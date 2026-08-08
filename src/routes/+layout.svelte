@@ -1,6 +1,7 @@
 <script lang="ts">
     import '../app.css';
     import { onMount } from 'svelte';
+    import { invalidateAll } from '$app/navigation';
     import { navigating, page } from '$app/state';
     import { busy } from '$lib/busy.svelte';
 
@@ -42,6 +43,39 @@
         else localStorage.setItem('theme', mode);
         apply();
     }
+
+    /**
+     * **戻ってきたら読み直す。**
+     *
+     * ホーム画面から開いたアプリ (PWA) は、閉じても捨てられない。端末は画面を
+     * 凍らせて残しておき、次に開いたときそのまま見せる — **前に閉じたときの
+     * 一覧がそのまま出る**。録画は増えているし、録画中だったものは終わっている。
+     *
+     * 知らせ (`liveUpdates`) を使っている画面でも足りない。あちらの繋ぎは
+     * 凍っている間に切られて戻ってこないうえ、繋ぎ直しても**凍っていた間に
+     * 起きたこと**は流れてこない (通知は溜めていない)。開き直した時点で
+     * 1回読み直すのが確実で、番組表やルールのように知らせを使っていない
+     * 画面もこれで揃う。
+     *
+     * `pageshow` も見るのは、履歴で戻ったとき (bfcache) が
+     * `visibilitychange` を伴わないため。**取っておいた画面のときだけ** —
+     * 素の読み込みでも来るので、見境なく読み直すと毎回2回読むことになる
+     */
+    onMount(() => {
+        const refresh = () => {
+            if (document.visibilityState !== 'visible') return;
+            void invalidateAll();
+        };
+        const restored = (event: PageTransitionEvent) => {
+            if (event.persisted) refresh();
+        };
+        document.addEventListener('visibilitychange', refresh);
+        window.addEventListener('pageshow', restored);
+        return () => {
+            document.removeEventListener('visibilitychange', refresh);
+            window.removeEventListener('pageshow', restored);
+        };
+    });
 
     const links = [
         { href: '/', label: '予約と録画' },

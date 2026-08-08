@@ -79,13 +79,36 @@
      * 探させるのは、テレビを点けたときの振る舞いから遠い
      */
     const rows: Record<number, HTMLElement | undefined> = $state({});
+    /** 一覧そのもの。**送るのはこの中だけ** (下の説明) */
+    let list = $state<HTMLElement | null>(null);
     /** 一度送ったら、あとは触らない。見ている途中で勝手に動くと邪魔になる */
     let scrolled = false;
     $effect(() => {
         const row = current === undefined ? undefined : rows[current.id];
-        if (scrolled || row === undefined) return;
+        if (scrolled || row === undefined || list === null) return;
         scrolled = true;
-        row.scrollIntoView({ block: 'center' });
+        /*
+         * **`scrollIntoView` は使わない。ページごと動く。**
+         *
+         * あれは「その要素が見えるところまで、**動かせるものは何でも動かす**」
+         * ので、一覧が中で動けないときは窓のほうが動く。一覧が中で動けるのは
+         * 横に並ぶ幅 (lg) だけで、**畳まれた幅では高さの上限が無い** —
+         * そこでは映像ごと上へ送られて、開いた瞬間に絵が画面から出ていた。
+         * 開き直しでは起きず**読み込み直したときだけ**起きるので
+         * (覚えていた局に送るのは1回きり)、「リロードすると画面全体が動く」
+         * という出方をする。
+         *
+         * 動かすのは一覧の中身だけにする。中で動けない幅では**何も起きない**
+         * のが正しい — 畳まれた幅では一覧はページの続きなので、そこまで
+         * 送ってしまうと今度は映像が見えない
+         */
+        const room = list.scrollHeight - list.clientHeight;
+        if (room <= 0) return;
+        // 位置は見えている座標から起こす。offsetTop は入れ子の基準がずれる
+        const here = row.getBoundingClientRect();
+        const box = list.getBoundingClientRect();
+        const middle = list.scrollTop + (here.top - box.top) - (box.height - here.height) / 2;
+        list.scrollTop = Math.max(0, Math.min(room, middle));
     });
 
     /** 全画面。映像だけでなく操作列も一緒に大きくしたいので、箱ごと入れる */
@@ -669,7 +692,7 @@
             だけに見えて押せると気付けなかった。枠を持たせ、指を乗せると浮かせ、
             いま映しているものは色で塗る
         -->
-        <ul class="flex-1 space-y-1 overflow-y-auto lg:min-h-0" data-testid="live-channels">
+        <ul bind:this={list} class="flex-1 space-y-1 overflow-y-auto lg:min-h-0" data-testid="live-channels">
             {#each listed as channel (channel.id)}
                 <!-- いま映しているものかどうかは、この行の中で5回使う -->
                 {@const tuned = current?.id === channel.id}

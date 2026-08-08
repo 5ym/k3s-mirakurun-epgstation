@@ -68,6 +68,20 @@ test.describe('エンコードの失敗', () => {
         await expect(failed.getByTestId('delete-confirm')).toBeVisible();
         await expect(failed).toHaveCount(1);
 
+        /*
+         * **他所を触ったら取り下げる。**
+         *
+         * 時間で戻すだけだと、間違えて押したことに気付いて別のところを触っても
+         * まだ構えたままで、その数秒のうちに同じ場所をもう一度押すと消える
+         */
+        // 画面から出ない場所を触る (行を押すと再生・詳細に行ってしまう)
+        await page.getByRole('heading', { name: '予約と録画' }).click();
+        await expect(failed.getByTestId('delete-confirm')).toHaveCount(0);
+        await expect(failed.getByTestId('delete-button')).toBeVisible();
+
+        await failed.getByTestId('delete-button').click();
+        await expect(failed.getByTestId('delete-confirm')).toBeVisible();
+
         const id = await failed.getAttribute('data-recording-id');
         await failed.getByTestId('delete-confirm').click();
         await expect(page.locator(`[data-recording-id="${id}"]`)).toHaveCount(0);

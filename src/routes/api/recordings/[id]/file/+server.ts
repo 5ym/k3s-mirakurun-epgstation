@@ -8,7 +8,7 @@ import type { Recording } from '$lib/types';
  * 録画ファイルをそのまま配る。
  * VLC / Infuse / Kodi に URL を渡して直接再生させるための口。
  */
-function respond(id: number, request: Request, download: boolean): Response {
+function respond(id: number, request: Request, download: boolean, source: string | null): Response {
     if (!Number.isFinite(id)) error(400, '録画IDが不正です');
 
     const recording = queryOne<Recording>('SELECT * FROM recordings WHERE id = ? AND deleted_at IS NULL', id);
@@ -28,10 +28,22 @@ function respond(id: number, request: Request, download: boolean): Response {
              WHERE recording_id = ? AND state IN ('queued', 'running')`,
             id,
         )?.n ?? 0;
+    /*
+     * **どちらを寄越すか、名指しもできる** (`?source=ts` / `?source=encoded`)。
+     *
+     * 2つとも残っている録画では、画面がダウンロードの口を2つ出す
+     * (`+page.svelte` の `recordingActions`)。上の「今いいほう」だけだと、
+     * **押した先が同じファイル**になってしまう。プレイヤーに渡す URL は
+     * 名指ししない — あちらは観られさえすればよく、選ばせるものではない
+     */
     const path =
-        encoding > 0 && recording.ts_path !== null
+        source === 'ts'
             ? recording.ts_path
-            : (recording.library_path ?? recording.ts_path);
+            : source === 'encoded'
+              ? recording.library_path
+              : encoding > 0 && recording.ts_path !== null
+                ? recording.ts_path
+                : (recording.library_path ?? recording.ts_path);
     if (path === null) error(404, 'ファイルがありません');
 
     // ?download=1 のときだけ添付にする。プレイヤーは inline のほうが素直に開く
@@ -44,9 +56,19 @@ function respond(id: number, request: Request, download: boolean): Response {
 }
 
 export function GET({ params, request, url }) {
-    return respond(Number(params.id), request, url.searchParams.get('download') === '1');
+    return respond(
+        Number(params.id),
+        request,
+        url.searchParams.get('download') === '1',
+        url.searchParams.get('source'),
+    );
 }
 
 export function HEAD({ params, request, url }) {
-    return respond(Number(params.id), request, url.searchParams.get('download') === '1');
+    return respond(
+        Number(params.id),
+        request,
+        url.searchParams.get('download') === '1',
+        url.searchParams.get('source'),
+    );
 }

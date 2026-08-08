@@ -75,6 +75,39 @@ test.describe('スクランブルされたまま録れたとき', () => {
              * どれだけ空くのかが画面から分からなかった
              */
             await expect(page.locator(row).getByTestId('row-body')).toContainText('生TS');
+
+            /*
+             * **両方あるなら、落とす口も2つ出す。**
+             *
+             * 1つしか無かった頃は、寄越されるのは焼いたほうだけで、**元には
+             * 手が届かなかった** — 画質を落としていない元が欲しい場面はある。
+             * 片方しか無い録画では今までどおり1つだけ (03-recording で確かめている)
+             */
+            await page.locator(row).getByTestId('detail-button').click();
+            const detail = page.getByTestId('program-detail');
+            await expect(detail.getByTestId('download-link')).toHaveText('エンコード済み');
+            const raw = detail.getByTestId('download-ts-link');
+            await expect(raw).toBeVisible();
+
+            /*
+             * **名指しした側が本当に来ること。** 落ちてくる名前で分かる —
+             * 焼いたほうは .mkv、元は .m2ts。ここが同じものを指していたら
+             * 口が2つある意味が無い
+             */
+            const fetchName = async (link: typeof raw) => {
+                const href = (await link.getAttribute('href')) ?? '';
+                const got = await request.get(href.replace(/^[^:]+:\/\/[^/]+/, ''), {
+                    headers: {
+                        Range: 'bytes=0-99',
+                        Authorization: `Basic ${Buffer.from('denpa:ひみつ', 'utf8').toString('base64')}`,
+                    },
+                });
+                expect(got.status()).toBe(206);
+                return got.headers()['content-disposition'] ?? '';
+            };
+            expect(await fetchName(raw)).toContain('.m2ts');
+            expect(await fetchName(detail.getByTestId('download-link'))).toContain('.mkv');
+            await page.getByTestId('detail-close').click();
         } finally {
             await setRecording(request);
         }

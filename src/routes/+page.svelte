@@ -43,8 +43,25 @@
      * ダウンロードに引き継がないので、素のURLだと 401 になって落ちてこない。
      * ?download=1 でサーバが添付として返し、ファイル名も付く
      */
-    const downloadUrl = (id: number) =>
-        withCredentials(`${origin}/api/recordings/${id}/file?download=1`, data.credentials);
+    const downloadUrl = (id: number, source?: 'ts' | 'encoded') =>
+        withCredentials(
+            `${origin}/api/recordings/${id}/file?download=1${source === undefined ? '' : `&source=${source}`}`,
+            data.credentials,
+        );
+
+    /**
+     * 焼いたものと生TSが**両方とも残っている**か。
+     *
+     * 「生TSも残す」で録ると、焼き上がったあとも元が消えずに残る。そのとき
+     * 落とす口が1つだと、寄越されるのは焼いたほうだけで、**元には手が届かない**
+     * (画質を落としていない元が欲しい場面はある)。
+     *
+     * **焼いている最中は数えない。** その間の配信は生TSのほうを返すので
+     * (`api/recordings/[id]/file`)、2つ並べると押した先が同じものになる
+     */
+    function bothFiles(rec: (typeof data.recordings)[number]): boolean {
+        return rec.job_id === null && rec.library_path !== null && rec.ts_path !== null;
+    }
 
     /** 押した結果。出す場所と消え方は Toasts が持っている */
     const notices = $derived.by(() => {
@@ -111,6 +128,25 @@
         armed = id;
         clearTimeout(disarm);
         disarm = setTimeout(() => (armed = null), 5000);
+    }
+
+    /**
+     * **他所を触ったら、聞き返しは取り下げる。**
+     *
+     * 聞き返しの間だけ「確定」が出ていて、押せば消える。時間で戻すだけだと、
+     * 間違えて押したことに気付いて別のところを触っても**まだ構えたまま**で、
+     * その5秒のうちに同じ場所をもう一度押すと消えてしまう。やめたことは
+     * 他所を触った時点で分かる。
+     *
+     * 削除まわりの2つだけ除く — 「削除」は次の行を構える押し方
+     * (この後 `arm` が入れ直す)、「確定」はまさに実行する押し方
+     */
+    function stand(event: MouseEvent): void {
+        if (armed === null) return;
+        const target = event.target as HTMLElement | null;
+        if (target?.closest('[data-testid="delete-button"], [data-testid="delete-confirm"]')) return;
+        clearTimeout(disarm);
+        armed = null;
     }
 
     /**
@@ -185,6 +221,9 @@
         detailRec = rec;
     }
 </script>
+
+<!-- 聞き返しは他所を触ったら取り下げる (`stand`) -->
+<svelte:window onclick={stand} />
 
 <!--
     予約も録画も、行の形を揃える。
@@ -629,13 +668,29 @@
             -->
             <a
                 class="btn btn-outline"
-                href={downloadUrl(rec.id)}
+                href={downloadUrl(rec.id, bothFiles(rec) ? 'encoded' : undefined)}
                 download
                 onclick={() => detail.close()}
                 data-testid="download-link"
             >
-                ダウンロード
+                {bothFiles(rec) ? 'エンコード済み' : 'ダウンロード'}
             </a>
+            {#if bothFiles(rec)}
+                <!--
+                    **元も落とせるようにする。** 両方残っているときだけ出す
+                    (`bothFiles`)。片方しか無い録画は左の1つがそれを寄越すので、
+                    並べても同じものが2つになるだけ
+                -->
+                <a
+                    class="btn btn-outline"
+                    href={downloadUrl(rec.id, 'ts')}
+                    download
+                    onclick={() => detail.close()}
+                    data-testid="download-ts-link"
+                >
+                    生TS
+                </a>
+            {/if}
             {#if rec.job_id === null && encodeSource(rec) !== null}
                 <!--
                     録り直しの元になるのは生TS。エンコード済みを元にしても

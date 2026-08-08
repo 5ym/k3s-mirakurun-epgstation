@@ -5,10 +5,24 @@ import { invalidateAll } from '$app/navigation';
  *
  * 短時間に何度も来ることがある(録画開始とエンコード投入など)ので、
  * 少しまとめてから1回だけ読み直す。
+ *
+ * ## 戻ってきたら繋ぎ直す
+ *
+ * **ホーム画面から開いたアプリ (PWA) は、閉じても捨てられない。** 端末は画面を
+ * 凍らせて残しておき、次に開いたときそのまま見せる。凍っている間に
+ * `EventSource` は切られるが、**これは自分では戻ってこない** — 繋ぎ直すのは
+ * ブラウザが切ったときだけで、凍結からの復帰は `CLOSED` のまま止まる。
+ * 結果、**開き直しても知らせが二度と来ない**状態になり、リロードするまで
+ * 古い一覧を見せ続けていた。
+ *
+ * 見えるようになったら、閉じていようがいまいが開き直す。閉じていなければ
+ * 何も起きない安い判定なので、迷わず毎回見る。読み直しそのものは土台側
+ * (`+layout.svelte`) がやる — あちらは知らせを使っていない画面 (番組表・
+ * ルール) も同じように古いままだった
  */
 export function liveUpdates(events: string[]): void {
     $effect(() => {
-        const source = new EventSource('/api/events');
+        let source: EventSource | null = null;
         let timer: ReturnType<typeof setTimeout> | null = null;
 
         const refresh = () => {
@@ -16,11 +30,26 @@ export function liveUpdates(events: string[]): void {
             timer = setTimeout(() => void invalidateAll(), 200);
         };
 
-        for (const event of events) source.addEventListener(event, refresh);
+        const connect = () => {
+            source?.close();
+            source = new EventSource('/api/events');
+            for (const event of events) source.addEventListener(event, refresh);
+        };
+        connect();
+
+        // 凍らされている間に切られた繋ぎは、開き直しても黙ったまま (上の説明)
+        const revive = () => {
+            if (document.visibilityState !== 'visible') return;
+            if (source === null || source.readyState === EventSource.CLOSED) connect();
+        };
+        document.addEventListener('visibilitychange', revive);
+        window.addEventListener('pageshow', revive);
 
         return () => {
             if (timer !== null) clearTimeout(timer);
-            source.close();
+            document.removeEventListener('visibilitychange', revive);
+            window.removeEventListener('pageshow', revive);
+            source?.close();
         };
     });
 }
