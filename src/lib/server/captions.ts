@@ -63,7 +63,6 @@
  */
 
 import { type CaptionTrack, CHANNEL } from '$lib/live';
-import { CaptionClock } from '$lib/ts/caption-clock';
 import { ServiceFilter } from '$lib/ts/service-filter';
 import { config } from './config';
 import { chunks, lines } from './stream';
@@ -91,8 +90,10 @@ export const TROUBLE = /error|Error|failed|Failed|Cannot|Unable|No such|Invalid 
 /**
  * 字幕を絵で取り出す ffmpeg の引数。
  *
- * - `-copyts` … **元TSの時刻をそのまま持つ。** 外すと ffmpeg は字幕1枚目を
- *   0 秒として数え直すので、映像側と物差しが揃わなくなる
+ * - `-copyts` … **元TSの時刻をそのまま持つ。** 受け側はこの時刻を使わないが
+ *   (`live.ts` の `captionLead`)、外すと ffmpeg は字幕1枚目を 0 秒として数え直す。
+ *   映像側と物差しが揃わなくなり、**サーバ側で2つの出口を突き合わせて測れなく
+ *   なる** — 待たせる量はそうやって測った値なので、外さない
  * - `-sub_type bitmap` … 文字ではなく絵で受け取る。描くのは libaribcaption
  * - `-canvas_size` … 上の説明。無いと 1440x1080 とみなされる
  * - `null` … **何もしないフィルタ。** 字幕をフィルタに通すこと自体が目的で
@@ -151,22 +152,14 @@ export function captionArgs(program: number, track = 0): string[] {
 /**
  * 字幕1枚。
  *
- * **いつ出すかは電波から読む** (`ts/caption-clock.ts`)。`showinfo` に喋らせて
- * いた頃は、**その行と絵の数が合わずにずれた** (上の説明)。電波の PES に乗って
- * いる時刻をそのまま採れば、数を合わせる必要そのものが無い
+ * **いつ出すかは持たない。** 受け側は「いま映っている絵 + 待たせる量」に置く
+ * (`live.ts` の `captionLead`)。放送の時刻を添えても、受け側の mp4 は
+ * 0 から始まるので物差しが違う。時刻を添えるために `showinfo` を読んでいた頃は、
+ * その行と絵がずれて字幕が遅れた (上の説明)
  */
 export interface Caption {
     /** パレットではない RGBA の PNG。画面まるごとの大きさ */
     data: Uint8Array;
-    /**
-     * **いつ出すか (放送時刻、90kHz)。** 電波の PES から読んだもの
-     * ([ts/caption-clock.ts](../ts/caption-clock.ts))。まだ読めていなければ null。
-     *
-     * ffmpeg が絵に付ける時刻と同じ値であることは実機で確かめてある
-     * (64件中64件が ±1ms 以内)。受け側の時計へ直すのは `live.ts` の `attend` —
-     * **焼いた1枚目の放送時刻を引く**
-     */
-    pts: number | null;
 }
 
 export type CaptionListener = (caption: Caption) => void;
@@ -337,8 +330,6 @@ class Captions {
 
     /** 入口の見出しから拾った、選べる字幕 */
     private readonly list: TrackList;
-    /** 電波から読む「その字幕をいつ出すか」 */
-    private readonly clock = new CaptionClock();
 
     constructor(
         readonly channelType: string,
@@ -414,8 +405,6 @@ class Captions {
                 if (this.stopped) break;
                 const out = filter === null ? chunk : filter.filter(chunk);
                 if (out.length === 0) continue;
-                // ffmpeg へ渡すのと同じものを読む (1局に絞ったあとの TS)
-                this.clock.feed(out);
                 /*
                  * **書けたことを待つ。** 待たずに捨てると、ffmpeg が降りたあとの
                  * EPIPE が誰にも受け取られない転びになり、**サーバごと落ちる** —
@@ -477,7 +466,7 @@ class Captions {
         const key = Bun.hash(png).toString(36);
         if (key === this.last) return;
         this.last = key;
-        this.hand({ data: png, pts: this.clock.latest });
+        this.hand({ data: png });
     }
 
     private hand(caption: Caption): void {
@@ -536,15 +525,17 @@ export function watchCaptions(
  * いまは画面まるごとを送るので x,y は 0 だが、**あとで切り抜くようにしても
  * 受け側を変えずに済む**ように持たせてある。
  *
- * **いつ出すかを添える。** 中身は**受け側の時計** (mp4 の 90kHz) — 電波から
- * 読んだ放送時刻から、焼いた1枚目の放送時刻を引いたもの (`live.ts` の `attend`)。
- * mp4 は必ず 0 から始まり、その 0 がどの放送時刻にあたるかは多重化器が握って
- * いて受け側からは見えないので、**サーバが直してから渡す**。
+ * **いつ出すかは添えない** (時刻は 0 で置く)。絶対の時刻 (放送の PTS) を
+ * 乗せる枠は取り決めにあるが、受け側はそれを使わない — mp4 は必ず 0 から
+ * 始まり、その 0 がどの放送時刻にあたるかは多重化器の都合で決まるので、
+ * 物差しが違う。受け側は**いま映っている絵から、決まった量だけ
+ * 待たせて**出す (`live.ts` の `captionLead`)。「いま焼いている絵より何ms前か」を
+ * 添えていたこともあるが、フィルタは符号器より先を走るので実機で5秒ずれた。
  *
  * **消すための別の種別も使わない。** 全部透明な絵を重ねれば消えるので、
  * 空かどうかを見分ける必要そのものが無い (上の説明)
  */
-export function frame(caption: Caption, at: bigint): { kind: number; pts: bigint; data: Uint8Array } {
+export function frame(caption: Caption): { kind: number; pts: bigint; data: Uint8Array } {
     const out = new Uint8Array(8 + caption.data.length);
     const view = new DataView(out.buffer);
     view.setUint16(0, 0);
@@ -552,7 +543,7 @@ export function frame(caption: Caption, at: bigint): { kind: number; pts: bigint
     view.setUint16(4, CANVAS.width);
     view.setUint16(6, CANVAS.height);
     out.set(caption.data, 8);
-    return { kind: CHANNEL.subtitle, pts: at, data: out };
+    return { kind: CHANNEL.subtitle, pts: 0n, data: out };
 }
 
 /** テスト用。掴んだままのものを残さない */

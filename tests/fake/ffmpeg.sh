@@ -31,14 +31,8 @@ if printf '%s\n' "$@" | grep -qx -- '-c' && printf '%s\n' "$@" | grep -qx -- 'co
 fi
 
 # ライブ配信(TS): stdin をそのまま stdout に流し続ける。
-# 中身は本物のTSではないが、「切るまで流れ続ける」という性質だけは同じ。
-#
-# **入口で見分ける。** ライブだけが標準入力から読む (`-i pipe:0`)。
-#
-# 出口では見分けられない — 映像側は出口が2つあって末尾が `/dev/null` になり、
-# `pipe:1` を探すと録画側の `-progress pipe:1` まで拾ってしまう (実際に
-# 録画とエンコードの試験を8件巻き込んだ)
-if [ "$input" = "pipe:0" ]; then
+# 中身は本物のTSではないが、「切るまで流れ続ける」という性質だけは同じ
+if [ "$output" = "pipe:1" ]; then
     # E2E から「映像側は入口で落ちる」と指示するための目印。
     #
     # 実機の tvk (T15) で出た形をそのまま真似る — 局が3つ相乗りしている TS で
@@ -63,12 +57,6 @@ if [ "$input" = "pipe:0" ]; then
     # あり、**2本ぶんが1回ぶんに見えて**いた (CI で落ちた)
     if [ -n "${FAKE_FFMPEG_ARGS_FILE:-}" ]; then
         printf -- '---\n%s\n' "$(printf '%s\n' "$@")" >> "$FAKE_FFMPEG_ARGS_FILE"
-    fi
-    # **原点を喋る。** 本物は `showinfo` を1枚だけ通して、焼いた1枚目の放送時刻を
-    # 出す (`server/live.ts` の `encodeArgs`)。サーバはこれを字幕の時刻を直すのに
-    # 使うので、偽物でも出しておく。偽の放送は 0 から始まる
-    if printf '%s\n' "$@" | grep -q showinfo; then
-        echo "[Parsed_showinfo_0 @ 0x1] n:   0 pts:0 pts_time:0.000000 duration:3003" >&2
     fi
 
     # **渡された TS の頭を残す。** ライブは1局に絞ってから ffmpeg へ渡すので

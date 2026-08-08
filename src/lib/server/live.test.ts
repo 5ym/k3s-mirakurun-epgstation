@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { type AudioSide, audioTracks } from '$lib/arib';
-import { codecsFor, encodeArgs } from './live';
+import { captionLead, codecsFor, encodeArgs } from './live';
 
 /** 1本目の音声をそのまま。番組表が何も言っていないときの既定 */
 const stereo = audioTracks([])[0];
@@ -139,7 +139,7 @@ describe('ライブの焼き方', () => {
         expect(args).not.toContain('0:p:1032:a:0');
     });
 
-    /** 受け側は使わないが、**焼いた1枚目の放送時刻**を知るのに要る (`Session.origin`) */
+    /** 受け側は使わないが、サーバ側で字幕と突き合わせて測るのに要る (`captionLead`) */
     test('元TSの時刻を保つ', () => {
         expect(plain()).toContain('-copyts');
     });
@@ -147,37 +147,21 @@ describe('ライブの焼き方', () => {
     /*
      * **字幕と時刻を突き合わせないので、コマごとに喋らせるものが無い。**
      *
-     * **コマごとには喋らせない。** `showinfo` を映像の焼き方に挟んでいた頃は
-     * **毎秒60行**が標準エラーに流れていた
+     * 絶対の時刻で合わせる道は2回外している (`live.ts` の説明)。いまは時刻では
+     * なく**待たせる量**を渡すので、コマごとに添えるものは何も無い。
+     * `showinfo` を挟んでいた頃は**毎秒60行**が標準エラーに流れていた
      */
     test('コマごとに showinfo を吐かせない', () => {
         expect(plain()[plain().indexOf('-vf') + 1]).not.toContain('showinfo');
     });
 
-    /**
-     * **原点だけは喋らせる。** 焼いた1枚目の放送時刻が要る (`Session.origin`) —
-     * 受け側が再生する fMP4 は 0 から始まり、**その 0 がどの放送時刻かは
-     * 多重化器が握っていて外から見えない**ため。
-     *
-     * `-frames:v 1` で1枚で畳ませるので、喋るのは1回きり
-     */
-    test('原点は1枚だけ喋らせる', () => {
-        const args = plain();
-        const at = args.lastIndexOf('-vf');
-        expect(args[at + 1]).toBe('showinfo');
-        expect(args[args.indexOf('-frames:v') + 1]).toBe('1');
-        // 出口は捨てる。焼いたものは上の pipe:1 のほう
-        expect(args.at(-1)).toBe('/dev/null');
-    });
-
     /*
-     * **`info` まで上げる。** `showinfo` は info で喋る。進み具合は `-nostats` で
-     * 止めてあるので、増えるのは入口の見出しと原点の1行だけ (実機で 20秒 116行)
+     * **失敗だけ残す。** `showinfo` を外したので絞れる。字幕側は絞れない
+     * (あちらは `showinfo` が info で喋る。`captions.ts`)
      */
-    test('原点を拾えるところまで記録を上げる', () => {
+    test('記録は失敗だけに絞る', () => {
         const args = plain();
-        expect(args[args.indexOf('-loglevel') + 1]).toBe('info');
-        expect(args).toContain('-nostats');
+        expect(args[args.indexOf('-loglevel') + 1]).toBe('error');
     });
 });
 
@@ -346,5 +330,35 @@ describe('コマ数の上限', () => {
         for (const codec of ['h264', 'av1'] as const) {
             expect(encodeArgs(1024, true, stereo, codec)).toContain('-fpsmax');
         }
+    });
+});
+
+/**
+ * **字幕を待たせる量。** 字幕は映像より先に出てくるので、そのぶん待たせる
+ * (`captionLead` に実測の内訳)。
+ */
+describe('字幕を待たせる量', () => {
+    /**
+     * **H.264 は待たせない。** 字幕が届いたときには、その字幕が属する映像も
+     * もう届いている (実機で 0 / 0.2 / 0.45秒 を出し比べて 0 がいちばん合った)
+     */
+    test('H.264 は待たせない', () => {
+        expect(captionLead('h264', true)).toBe(0);
+        expect(captionLead('h264', false)).toBe(0);
+    });
+
+    /** **局では変わらない。** 電波の中の先回りは字幕にも映像にも掛かって相殺する */
+    test('局では変わらない', () => {
+        expect(captionLead('h264', true)).toBe(captionLead('h264', false));
+        expect(captionLead('av1', true)).toBe(captionLead('av1', true));
+    });
+
+    /**
+     * **AV1 だけ待たせる。** SVT-AV1 が溜め込むぶん映像だけが遅れて届く。
+     * 溜める量は枚数で決まるので、コマ数を倍にすると待ちは縮む
+     */
+    test('AV1 は待たせる。コマ数が多いほど短い', () => {
+        expect(captionLead('av1', false)).toBeGreaterThan(captionLead('h264', false));
+        expect(captionLead('av1', true)).toBeLessThan(captionLead('av1', false));
     });
 });
