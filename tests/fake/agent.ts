@@ -106,6 +106,16 @@ interface Lease {
 /** いま開いている選局。本物のプールに当たるもの */
 const leases = new Map<number, Lease>();
 
+/**
+ * **開かれた記録。** 誰が、どの強さで掴みに来たか。
+ *
+ * 掴んでいる最中の見た目は一瞬で消える (偽エージェントは本物より速い) ので、
+ * 「その強さで掴みに行った」ことを試験から確かめるには記録が要る
+ * (`16-scan.spec.ts`)。溜め続けないよう直近だけ持つ
+ */
+const opens: { use: string; priority: number; type: string; channel: string }[] = [];
+const OPENS_KEEP = 200;
+
 function tunerStatus() {
     return TUNERS.map((tuner) => {
         /*
@@ -212,6 +222,8 @@ function openStream(url: URL, signal: AbortSignal): Response {
     const lease = leases.get(index) as Lease;
     const user = { use, priority };
     lease.users.push(user);
+    opens.push({ use, priority, type, channel });
+    if (opens.length > OPENS_KEEP) opens.shift();
     emit('tuners');
 
     const at = index;
@@ -253,6 +265,8 @@ const options: Bun.ServeOptions = {
             return json({ ok: true, noPresentFollowing: knobs.noPresentFollowing });
         }
         if (url.pathname === '/__control/listeners') return json({ listeners: listeners.size });
+        /* 掴みに来た記録。**掴んでいる一瞬を待たずに確かめるため** */
+        if (url.pathname === '/__control/opens') return json({ opens });
         /*
          * **繋ぎを壊す。Pod を入れ替えたのと同じ形。**
          *

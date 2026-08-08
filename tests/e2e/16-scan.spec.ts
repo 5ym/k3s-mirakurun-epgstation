@@ -37,28 +37,35 @@ test.describe('チューナー画面', () => {
      * 番組表がなかなか埋まらない。押されている間は**録画以外を蹴る強さ**で
      * 掴みに行くので、そこまで見ておく (画面の「掴む強さ」がそれ)
      */
-    test('番組表をいますぐ集められる。掴む強さも上がる', async ({ page, request }) => {
+    test('番組表をいますぐ集められる。掴む強さも上がる', async ({ page, request, stack }) => {
         await syncEpg(request);
         await goto(page, '/tuners');
 
         await page.getByTestId('epg-collect-now').click();
 
         /*
-         * 掴んだ相手が誰で、どの強さで掴んでいるかはチューナー画面に出る。
+         * **掴みに行った記録を見る。掴んでいる一瞬は待たない。**
          *
-         * **2つに分けて見ない。** 「番組表が居る」と「掴む強さ 8」を別々の
-         * `expect` で見ていた頃は、**その間に集め終わって空きに戻り**、2つ目で
-         * 落ちていた (CI で断続的に落ちた。相手は偽エージェントなので速い)。
-         * **両方が書いてある行が1つでもある**か、を1回の待ちで見る。
+         * 「番組表が居る」「掴む強さ 8」を画面で待っていた頃は CI で落ちていた —
+         * 偽エージェントは本物より速いので、**掴んでいる状態を画面が描く前に
+         * 集め終わる**。見えるかどうかは相手の速さ次第で、確かめたいことではない。
          *
-         * 行を数えないのは、**何本のチューナーで集めに行くかが決まっていない**
-         * ため (空いていれば同時に掴む。実際に3本当たった)
+         * 確かめたいのは「**その強さで掴みに行った**」ほう。画面での見え方は
+         * 下の「チューナーの空きと取れているチャンネルが出る」が、塞がった状態を
+         * 作って確かめている
          */
-        const collecting = page
-            .getByTestId('tuner-row')
-            .filter({ hasText: '番組表' })
-            .filter({ hasText: '掴む強さ 8' });
-        await expect(collecting.first()).toBeVisible({ timeout: 30_000 });
+        await expect
+            .poll(
+                async () => {
+                    const res = await request.get(`${stack.agentUrl}/__control/opens`);
+                    const { opens } = (await res.json()) as {
+                        opens: { use: string; priority: number }[];
+                    };
+                    return opens.some((o) => o.use.startsWith('epg') && o.priority === 8);
+                },
+                { timeout: 30_000, message: '番組表を強さ8で掴みに行っていない' },
+            )
+            .toBe(true);
 
         // 終わったら押せる状態に戻る。戻らないと次に押せない
         await expect(page.getByTestId('epg-collect-now')).toBeEnabled({ timeout: 120_000 });
@@ -91,6 +98,16 @@ test.describe('チューナー画面', () => {
         await expect(using.getByTestId('tuner-user').first()).toContainText('録画');
         // 録画と番組表が同じ選局に相乗りしている。チューナーは増えない
         await expect(using.getByTestId('tuner-user').nth(1)).toContainText('番組表');
+        /*
+         * **どの強さで掴んでいるかも出す。** 何かに蹴られたとき、蹴った側と
+         * 蹴られた側のどちらが強かったのかが分からないと追えない。
+         *
+         * ここで見るのは**塞がった状態を自分で作ってある**から動かない。
+         * 「いますぐ集める」の側で見ていた頃は、掴んでいる一瞬を捕まえられずに
+         * 落ちていた (上の説明)
+         */
+        await expect(using.getByTestId('tuner-user').first()).toContainText('掴む強さ 10');
+        await expect(using.getByTestId('tuner-user').nth(1)).toContainText('掴む強さ 3');
 
         // スキャンで見つかった物理チャンネルと、denpa が取り込んだ局名
         const channels = page.getByTestId('channel-list');
