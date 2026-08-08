@@ -17,7 +17,7 @@ import {
     SOCKET_PATH,
     type Tuned,
 } from '$lib/live';
-import { type Cue, captionAt, currentCue, insertCue, trimCues } from '$lib/ts/captions';
+import { type Cue, currentCue, insertCue, trimCues } from '$lib/ts/captions';
 import { FLOOR, nextTarget, pacing } from '$lib/ts/pacing';
 
 export type LiveState = 'idle' | 'connecting' | 'playing' | 'error';
@@ -121,14 +121,6 @@ export function livePlayer() {
     /** いま焼いてもらっている形。**サーバが返してきたものを持つ** */
     let codec = $state<LiveCodec>('h264');
     /**
-     * 字幕を出すまで待たせる量 (秒)。**サーバが決めて寄越す。**
-     *
-     * **H.264 は 0** — 字幕が届いたときには、その字幕が属する映像も届いている。
-     * AV1 だけ符号器が溜め込むぶん待たせる (`server/live.ts` の `captionLead`)。
-     * ここに置いてあるのは `tuned` が届く前の繋ぎ
-     */
-    let lead = 0;
-    /**
      * 断り書き。**失敗ではないが、頼まれたとおりにできなかったとき。**
      *
      * いまのところ「AV1 を出せない端末なので H.264 に戻した」の1つだけ。
@@ -165,8 +157,8 @@ export function livePlayer() {
     /**
      * 待たせている字幕。**時刻の順に並べておく** ([ts/captions.ts](./ts/captions.ts))。
      *
-     * H.264 は届いた時点の再生位置に置くので、ほぼその場で出る。AV1 だけ
-     * 符号器が溜め込むぶん待たせるので、再生位置が追いつくまで持っておく
+     * 出す時刻はサーバが直して寄越すので (`live.ts` の頭の8バイト)、その時刻に
+     * 再生位置が追いつくまで持っておく
      */
     let cues: Cue[] = [];
     /** いま重ねている1枚。同じものを描き直さない */
@@ -624,16 +616,24 @@ export function livePlayer() {
      *   次の字幕まで何も出なくなる。映像の時刻も変わらないので待たせているぶんは使える
      */
     function forget(keepCaptions: boolean): void {
+        /*
+         * **待たせている字幕は必ず捨てる。** 焼き直せば器も作り直しになり、
+         * 再生位置は 0 から数え直しになる。字幕に添えられている時刻は**その
+         * 時計のもの**なので、持ち越すと二度と出番が来ない。
+         *
+         * 捨てても画面が空にならないのは、**サーバがいま出ている1枚を
+         * 送り直す**ため (`server/live.ts` の `attend`)
+         */
+        clearCaptions();
         if (!keepCaptions) {
-            clearCaptions();
-            // 局が変われば、持っている字幕も変わる (字幕そのものが無い局もある)
+            // 局が変われば、選べる字幕も変わる (字幕そのものが無い局もある)
             captionTracks = [];
             captionTrack = 0;
         }
         clear();
     }
 
-    /** 待たせている字幕を捨てる。**局を変えるときだけ** (`forget` の説明) */
+    /** 待たせている字幕を捨てる。**焼き直すたび** (`forget` の説明) */
     function clearCaptions(): void {
         generation++;
         for (const cue of cues) cue.bitmap?.close();
@@ -805,7 +805,6 @@ export function livePlayer() {
                     audios = notice.audios;
                     audio = notice.audio;
                     codec = notice.codec;
-                    lead = notice.lead;
                     start(video, notice.codecs, notice.codec);
                 }
                 return;
@@ -844,15 +843,16 @@ export function livePlayer() {
             if (kind === CHANNEL.subtitle || kind === CHANNEL.subtitleClear) {
                 if (element === null) return;
                 /*
-                 * **いま映っている絵に合わせる** ([ts/captions.ts](./ts/captions.ts)
-                 * の `captionAt`)。待たせる量はサーバが決めて寄越す (`lead`) が、
-                 * H.264 は 0 なので実質「届いたら出す」。
+                 * **時刻はサーバが直して寄越す。** 頭の8バイトが、受け側の時計
+                 * (mp4 の 90kHz) で「いつ出すか」([live.ts](./live.ts))。
                  *
-                 * 「いちばん新しく届いている映像」(`buffered.end`) に置いていた頃は、
-                 * **貯めているぶんだけ遅れて**いた。絶対の時刻で合わせられない理由は
-                 * [stream.md](../../docs/stream.md) §5.4
+                 * **合わせる仕掛けはもう無い。** 待たせる量を決め打っていた頃は
+                 * 2回外し、局ごとに数える仕掛けまで作って外した — 焼いた mp4 の
+                 * 中身がどの放送時刻に当たるかが**外から見えない**のが原因で、
+                 * そこはサーバが ffmpeg に1行喋らせて掴むようにした
+                 * ([stream.md](../../docs/stream.md) §5.4)
                  */
-                const at = captionAt(element.currentTime, lead);
+                const at = Number(new DataView(data).getBigUint64(1)) / 90000;
 
                 if (kind === CHANNEL.subtitleClear) {
                     cues = insertCue(cues, { at, bitmap: null });

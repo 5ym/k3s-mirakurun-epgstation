@@ -21,9 +21,10 @@
 
 import { type Audio, type AudioTrack, audioTracks, pickTrack } from '$lib/arib';
 import { CHANNEL, type LiveCodec, type Notice } from '$lib/live';
+import { since } from '$lib/ts/caption-clock';
 import { Fmp4Splitter } from '$lib/ts/fmp4';
 import { ServiceFilter } from '$lib/ts/service-filter';
-import { frame, TROUBLE, watchCaptions } from './captions';
+import { type Caption, frame, TROUBLE, watchCaptions } from './captions';
 import { config } from './config';
 import { queryOne } from './db';
 import { deinterlace, smoothMotionFor } from './encoder';
@@ -43,7 +44,7 @@ import type { Connection } from './ws';
  *   数秒溜めてから出すので、その場でライブでなくなる
  * - `-copyts` … 元TSの時刻を保つ。**受け側は使わない** (mp4 は 0 から始まるので
  *   物差しが違う) が、外すと**サーバ側で映像と字幕を突き合わせて測れなくなる** —
- *   `captionLead` の値はこれがあるから測れた
+ *   **焼いた1枚目の放送時刻**がこれで取れる (下の「字幕には…」)
  *
  * ## コマごとに切らない
  *
@@ -78,20 +79,18 @@ import type { Connection } from './ws';
  * コマ数を倍にしないのも録画と揃える — 元が毎秒24コマ前後なので、倍にしても
  * 同じ絵が並ぶだけで、CPU だけ倍かかる。
  *
- * ## 字幕とは時刻を突き合わせない。**待たせる量だけ渡す**
+ * ## 字幕には、受け側の時計に直した時刻を添える
  *
- * **絶対の時刻では合わせられない。** `-copyts` で放送の時刻を保っているのは
- * ffmpeg の中までで、mp4 の多重化器は最初のパケットを 0 に詰め直す
- * (`-avoid_negative_ts disabled` も `-muxdelay 0` も `-output_ts_offset` も
- * 効かない。実機で確認)。しかもその「最初のパケット」は**音声**のことが多い —
- * 焼かれた1コマ目の放送時刻を引く手を採ったときは、実機で 2.4 秒ずれた。
- * 「いま焼いている絵より何秒前か」を添える手も、フィルタが符号器より先を走る
- * ぶん 5 秒ずれた。**どちらもこちらの都合で動く量**だった。
+ * **焼いた mp4 の中身がどの放送時刻に当たるかは、外から見えない。** `-copyts` が
+ * 効くのは ffmpeg の中までで、多重化器は先頭を 0 に詰め直す (実機で `tfdt = 0`。
+ * `-avoid_negative_ts disabled` も `-muxdelay 0` も `-output_ts_offset` も効かない)。
  *
- * 添えるのは時刻ではなく、**どれだけ待たせるか**にした (`captionLead`)。
- * 受け側はそれを、いま映っている絵に足して置く。
+ * **だから同じ ffmpeg に聞く。** 出口をもう1つ足して、**焼いた1枚目の放送時刻を
+ * 1行だけ喋らせる** (下の `-frames:v 1` の `showinfo`)。字幕の放送時刻は電波から
+ * 直に読めるので (`ts/caption-clock.ts`)、あとは引き算1つ (`attend`)。
  *
- * そのため `showinfo` は要らない — コマごとに喋らせるものが無い。
+ * **コマごとに喋らせるものは無い。** `showinfo` を映像の焼き方に挟んでいた頃は
+ * 毎秒60行が標準エラーに流れていた。ここは1枚で畳ませてある。
  *
  * ## 局を名指しで選ぶ。**渡す前にも絞る**
  *
@@ -166,13 +165,14 @@ export function encodeArgs(
               : null;
     return [
         '-hide_banner',
+        '-nostats',
         /*
-         * **失敗だけ残す。** 入口の見出しも進み具合も要らない (見ているのは
-         * 焼けない理由だけ)。字幕側は `showinfo` が info で喋るぶん下げられないが、
-         * こちらは喋らせるものが無い
+         * **`info` まで上げる。** 下の「原点を1行だけ喋らせる」で `showinfo` を
+         * 使い、あれは info で喋る。進み具合は `-nostats` で止めてあるので、
+         * 増えるのは入口の見出しと**その1行**だけ。読む側は失敗だけ残す (`watch`)
          */
         '-loglevel',
-        'error',
+        'info',
         '-fflags',
         'nobuffer',
         // 渡す前に1局へ絞ってあるので、これで足りる (上の説明)
@@ -223,6 +223,30 @@ export function encodeArgs(
         '-flush_packets',
         '1',
         'pipe:1',
+        /*
+         * **原点を1行だけ喋らせる** (`Session.origin`)。
+         *
+         * 焼いた fMP4 は必ず 0 から始まり、**その 0 がどの放送時刻に当たるかは
+         * どこにも出てこない** (多重化器が詰め直す。実機で `tfdt = 0` を確認)。
+         * だから字幕を放送時刻で受け取っても、受け側は自分の時計に直せない。
+         *
+         * 足りないのは**その1つの数**だけ。`-copyts` を付けてあるので、
+         * **復号した1枚目の時刻がそのまま原点**になる。復号は共通なので、
+         * ここで見える1枚目は上の出口が焼く1枚目と同じもの。
+         *
+         * `-frames:v 1` で1枚で畳むので、喋るのも1回きり。**別の ffmpeg を
+         * 起こして突き合わせる手は使えない** — 焼き始めの鍵フレームが
+         * 0〜0.5秒 ずれるので、そちらでは測れなかった
+         */
+        '-map',
+        `${from}:v:0`,
+        '-vf',
+        'showinfo',
+        '-frames:v',
+        '1',
+        '-f',
+        'null',
+        '/dev/null',
     ];
 }
 
@@ -259,7 +283,7 @@ export function encodeArgs(
  * 目に見えて粗く、遅い 10 は間に合わなくなる。
  *
  * **付けてもまだ溜め込む。** 電波が届いてから塊が出るまで H.264 の 0.24〜0.49秒
- * に対し **1.1〜1.5秒** (`captionLead` に実測)。低遅延指定 (`pred-struct=1`) は
+ * に対し **1.1〜1.5秒**。低遅延指定 (`pred-struct=1`) は
  * 実時間に間に合わなくなるので使えない。**AV1 を選ぶと放送の今から1秒ぶん
  * 離れる** — 切り替えにもそう出してある (`LIVE_CODECS`)。
  */
@@ -332,56 +356,6 @@ export function codecsFor(codec: LiveCodec): string {
         : 'video/mp4; codecs="avc1.640029,mp4a.40.2"';
 }
 
-/**
- * **字幕を出すまで待たせる量 (秒)。焼き方で決まるので、ここで決めて画面へ渡す。**
- *
- * 受け側は「いちばん新しく届いている映像」に、この量を足したところへ字幕を置く
- * ([stream.md](../../../docs/stream.md) §5.4)。
- *
- * ## H.264 は待たせない
- *
- * **字幕が届いたときには、その字幕が属する映像はもう届いている。** 放送は
- * 字幕も映像も前もって送るが (字幕は描く手間ぶん、映像は復号器の溜めぶん)、
- * 映像を焼いて包む手間がそれを食う。差し引きで待ちは残らない。
- *
- * **ここは2回外した。値ではなく、見方を間違えた。**
- *
- * - 1回目は「字幕の先回り」だけを見た。映像も先送りされていることを忘れて
- *   いて、0.5秒 待たせた。**局差が消えたように見えたのは偶然** — 字幕と
- *   映像の先回りは局ごとに同じ方向へ動くので、片方だけ見ても揃って見える
- * - 2回目は両方を見て差を採った (0.42秒)。**今度は焼く手間を数え落とした。**
- *   差そのものは実測で 292〜321ms と堅いのに、それを足すのが誤り
- *
- * **どちらも実機の出口どうしを突き合わせて測っていた。** 焼いた mp4 の中身が
- * どの放送時刻に当たるかは多重化器が握っていて外から見えず、別々に起こした
- * ffmpeg は焼き始めの鍵フレームが 0〜0.5秒 ずれる。装置を5通り作って
- * -60〜+450ms とばらけ、同じ局の2回で 150ms 動いた。**測れないものを
- * 測ろうとしていた。**
- *
- * 決めたのは**画面を見た人**。0 / 0.2 / 0.45 秒を出し比べて 0 がいちばん
- * 合った。数えるための仕掛け (`ts/caption-lead.ts`) は、そういうわけで消した。
- *
- * ## AV1 は待たせる
- *
- * **SVT-AV1 が溜め込むぶん、映像だけが遅れて届く。** `lookahead=0` は指定済みで、
- * 低遅延指定 (`pred-struct=1`) は実機で追いつかなくなった (出口が 6秒 → 22秒 と
- * 離れていく)。電波が届いてから塊が出るまで H.264 の 0.24〜0.49秒 に対し
- * 1.1〜1.5秒 かかるので、その差だけ字幕を待たせる。コマ数で変わるのは
- * 溜める量が枚数で決まっているから。
- *
- * **こちらは出し比べていない。** H.264 との差から起こした値なので、
- * ずれていたら合わせ直す
- */
-export function captionLead(codec: LiveCodec, smooth: boolean): number {
-    if (codec === 'av1') return smooth ? AV1_WAIT : AV1_WAIT_30;
-    return 0;
-}
-
-/** AV1 で待たせる量 (秒)。60コマ。H.264 との焼く手間の差 */
-const AV1_WAIT = 0.9;
-/** 同 30コマ。溜める量は枚数で決まるので、コマが半分なら尺は長くなる */
-const AV1_WAIT_30 = 1.25;
-
 interface Viewer {
     connection: Connection;
     /** init を渡したか。渡す前に中身を送っても MSE は捨てる */
@@ -396,6 +370,16 @@ class Session {
     /** 最後に流した init。途中から入ってきた人に真っ先に渡す */
     private init: Uint8Array | null = null;
     private stopped = false;
+    /**
+     * **焼いた1枚目の放送時刻 (90kHz)。分かるまでは null。**
+     *
+     * 受け側が再生している fMP4 は 0 から始まる。**その 0 がここ**なので、
+     * 字幕の放送時刻からこれを引けば、受け側の時計に直る (`attend`)。
+     * ffmpeg に1行だけ喋らせている (`encodeArgs` の最後の出口)
+     */
+    private start: number | null = null;
+    /** 原点が分かるのを待っている人。分かった時点で1回だけ呼ぶ */
+    private waiting: ((start: number) => void)[] = [];
 
     constructor(
         readonly channelType: string,
@@ -601,10 +585,38 @@ class Session {
      */
     private async watch(proc: ReturnType<typeof Bun.spawn>): Promise<void> {
         for await (const line of lines(proc.stderr as ReadableStream<Uint8Array>)) {
+            if (this.start === null) this.readStart(line);
             if (TROUBLE.test(line)) {
                 console.warn(`[live] ${this.channelType}:${this.channel} ffmpeg: ${line.trim()}`);
             }
         }
+    }
+
+    /**
+     * 焼いた1枚目の放送時刻を拾う (`encodeArgs` の最後の出口が喋る)。
+     *
+     *     [Parsed_showinfo_0 @ …] n:   0 pts:7222323898 pts_time:80248.043311 …
+     *
+     * **`-copyts` があるから放送時刻のまま出る。** 1枚で畳ませてあるので1回きり
+     */
+    private readStart(line: string): void {
+        const found = /pts_time:([0-9.]+)/.exec(line);
+        if (found === null) return;
+        this.start = Math.round(Number(found[1]) * 90000);
+        const waiting = this.waiting;
+        this.waiting = [];
+        for (const tell of waiting) tell(this.start);
+    }
+
+    /** 原点。**まだ分かっていなければ null** */
+    get origin(): number | null {
+        return this.start;
+    }
+
+    /** 原点が分かったら呼ぶ。**分かっているならその場で呼ぶ** */
+    whenOrigin(tell: (start: number) => void): void {
+        if (this.start !== null) tell(this.start);
+        else this.waiting.push(tell);
     }
 
     tell(notice: Notice): void {
@@ -738,6 +750,43 @@ export function attend(connection: Connection): void {
     let captionKey = '';
     let dropCaptions: (() => void) | null = null;
 
+    /**
+     * 字幕を1枚渡す。**放送時刻を、受け側の時計に直してから。**
+     *
+     * 受け側が再生している fMP4 は 0 から始まり、その 0 がどの放送時刻に当たるかは
+     * 多重化器が握っていて出てこない (実機で `tfdt = 0` を確認)。**焼いた1枚目の
+     * 放送時刻をサーバが拾ってある**ので (`Session.origin`)、ここで引く。
+     *
+     * これで待たせる量も焼き方ごとの定数も要らない — **合わせるのではなく、
+     * 合っている時刻を渡す**。AV1 が溜め込むぶんも自然に吸われる (その字幕の
+     * 映像がまだ届いていなければ、受け側はそこまで待つだけ)。
+     *
+     * **原点が分かるまでは持っておく。** 選局から1枚目が焼けるまでの数百ミリ秒に
+     * 掛かった1枚を捨てると、次の字幕まで (間隔の空く番組では数十秒) 何も出ない
+     */
+    let held: Caption | null = null;
+    /** 最後に渡した1枚。**焼き直したら送り直す** (下の説明) */
+    let last: Caption | null = null;
+    const show = (caption: Caption) => {
+        last = caption;
+        const session = current;
+        if (session === null || caption.pts === null) return;
+        const origin = session.origin;
+        if (origin === null) {
+            held = caption;
+            session.whenOrigin(() => {
+                const waiting = held;
+                held = null;
+                if (waiting !== null) show(waiting);
+            });
+            return;
+        }
+        // 一周 (2^33) を跨いでも近いほうを採る。原点より前なら 0 に丸める
+        const at = Math.max(0, since(caption.pts, origin));
+        const { kind, pts, data } = frame(caption, BigInt(at));
+        connection.send(kind, pts, data);
+    };
+
     const leave = () => {
         if (current === null) return;
         current.remove(viewer);
@@ -772,10 +821,7 @@ export function attend(connection: Connection): void {
             serviceId,
             program,
             track,
-            (caption) => {
-                const { kind, pts, data } = frame(caption);
-                connection.send(kind, pts, data);
-            },
+            (caption) => show(caption),
             // 選べる字幕。**1枚も届いていなくても分かる** (入口の見出しに出ている)
             (tracks) => tell({ type: 'captions', tracks, track }),
         );
@@ -855,12 +901,17 @@ export function attend(connection: Connection): void {
             channel,
             codecs: codecsFor(codec),
             codec,
-            lead: captionLead(codec, now.smooth),
             audio: now.audio.id,
             audios: now.audios,
         };
         connection.send(CHANNEL.control, 0n, new TextEncoder().encode(JSON.stringify(notice)));
         current = watch(channelType, channel, serviceId, now, codec, viewer);
+        /*
+         * **いま出ている字幕を送り直す。** 焼き直すと受け側の時計は 0 から
+         * 数え直しになるので、前の時計で渡した字幕は捨てられる (`forget`)。
+         * 送り直さないと、次の字幕まで (間隔の空く番組では数十秒) 何も出ない
+         */
+        if (last !== null) show(last);
     };
 
     connection.onclose = () => {

@@ -208,7 +208,7 @@ describe('TrackList', () => {
 describe('frame', () => {
     test('絵は種別 0x20 で、頭に置き場所が付く', () => {
         const data = png(0x11);
-        const out = frame({ data });
+        const out = frame({ data, pts: null }, 0n);
         expect(out.kind).toBe(CHANNEL.subtitle);
         const view = new DataView(out.data.buffer, out.data.byteOffset);
         expect([view.getUint16(0), view.getUint16(2), view.getUint16(4), view.getUint16(6)]).toEqual([
@@ -221,17 +221,16 @@ describe('frame', () => {
     });
 
     /*
-     * **いつ出すかは添えない。** 絶対の時刻で合わせる道は2回外している —
-     * mp4 の 0 は多重化器の都合で決まる (probe の間に溜まった音声に合う。実機で
-     * 2.4秒ずれた) し、「焼いている絵より何秒前か」を送る道もフィルタが符号器より
-     * 先を走るぶんずれた (実機で5秒)。受け側は**いちばん新しく届いている映像から、
-     * 決まった量だけ待たせて**出す (`live.ts` の `captionLead`)。
+     * **いつ出すかは添える。受け側の時計に直したもの。**
      *
-     * 放送の時刻を添えるのもやめた。読むには `showinfo` を別の口で喋らせる
-     * ことになり、**その行と絵の数が合わずに字幕が遅れていた** (captions.ts)
+     * 元は放送時刻 (電波の PES から読む。`ts/caption-clock.ts`) で、そこから
+     * **焼いた1枚目の放送時刻**を引いたものが載る (`live.ts` の `attend`)。
+     * fMP4 は必ず 0 から始まり、その 0 がどの放送時刻かは多重化器が握っていて
+     * 受け側からは見えないので、サーバが直してから渡す
      */
-    test('いつ出すかは添えない', () => {
-        expect(frame({ data: png(0x11) }).pts).toBe(0n);
-        expect(frame({ data: png(0x11) }).data.length).toBe(8 + png(0x11).length);
+    test('いつ出すかを添える', () => {
+        const at = BigInt(90000 * 3);
+        expect(frame({ data: png(0x11), pts: null }, at).pts).toBe(at);
+        expect(frame({ data: png(0x11), pts: null }, at).data.length).toBe(8 + png(0x11).length);
     });
 });
